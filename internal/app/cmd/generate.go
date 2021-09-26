@@ -1,9 +1,7 @@
 package cmd
 
 import (
-	"fmt"
 	"io/ioutil"
-	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -13,9 +11,19 @@ import (
 	loger "github.com/ka1i/wispeeer/pkg/log"
 )
 
+var (
+	total     uint64
+	wispeeers tools.Wispeeers
+)
+
 func (c *CMD) Generate() error {
 	var err error
-	loger.Task("generate").Infof("Location : %v", utils.GetWorkspace())
+
+	wispeeers.Options = c.Options
+	wispeeers.Pages = append(wispeeers.Pages, "home")
+
+	// clear old public
+	tools.FileRemove(c.Options.PublicDir)
 
 	staticAssets := path.Join(c.ThemeStr, c.Options.Theme, c.StaticStr)
 	if utils.IsExist(staticAssets) {
@@ -33,9 +41,11 @@ func (c *CMD) Generate() error {
 	if err != nil {
 		return err
 	}
-	//loger.Task("generate").Infof("Article  : %d (Total)\n", Total)
+	loger.Task("generate").Infof("Article  : %d (Total)\n", total)
 
-	c.detailsCheck()
+	dst := path.Join(c.Options.PublicDir, "index.html")
+	tmpl := path.Join(c.ThemeStr, c.Options.Theme, c.LayoutStr, "index.html")
+	tools.ListRender(wispeeers, tmpl, dst)
 
 	return nil
 }
@@ -54,7 +64,11 @@ func (c *CMD) render(startDIR string) error {
 		pathLevel := len(pathLevelSlice)
 		if utils.IsFile(filefullName) {
 			if pathLevel == 1 {
-				fmt.Printf("[COPY] ")
+				oneLevelAsset := path.Join(c.Options.PublicDir, f.Name())
+				err = tools.FileCopy(filefullName, oneLevelAsset)
+				if err != nil {
+					return err
+				}
 			}
 			suffix := path.Ext(f.Name())
 			title := strings.TrimSuffix(f.Name(), suffix)
@@ -62,34 +76,30 @@ func (c *CMD) render(startDIR string) error {
 			if pathLevel == 2 && suffix == ".md" {
 
 				if pathLevelSlice[1] == c.Options.PostDir {
-					fmt.Printf("[POST] ")
-					fmt.Println(pathLevel, "FILE", title)
-
-					adst := path.Join(c.Options.PublicDir, c.Options.Permalink, title+".html")
-					c.processor(filefullName, adst, c.Options.Permalink)
-
+					// process post
+					dstPath := path.Join(c.Options.PublicDir, c.Options.Permalink)
+					err = c.processor(filefullName, path.Join(dstPath, title+".html"), "post")
+					if err != nil {
+						return err
+					}
 					assetRoot := path.Join(startDIR, title)
 					if utils.IsDir(assetRoot) {
-						fmt.Printf("[COPY] ")
-						fmt.Println(pathLevel, "DIR", assetRoot)
-						dst := path.Join(c.Options.PublicDir, c.Options.Permalink, title)
+						dst := path.Join(dstPath, title)
 						err = tools.DirCopy(assetRoot, dst)
 						if err != nil {
 							return err
 						}
 					}
 				} else {
-					fmt.Printf("[PAGE] ")
-					fmt.Println(pathLevel, "FILE", filefullName)
-
-					adst := path.Join(c.Options.PublicDir, pathLevelSlice[1], title+".html")
-					c.processor(filefullName, adst, pathLevelSlice[1])
-
+					// process page
+					dstPath := path.Join(c.Options.PublicDir, pathLevelSlice[1])
+					err := c.processor(filefullName, path.Join(dstPath, title+".html"), "page")
+					if err != nil {
+						return err
+					}
 					assetRoot := path.Join(startDIR, c.Options.PageAsset)
 					if utils.IsDir(assetRoot) {
-						fmt.Printf("[COPY] ")
-						fmt.Println(pathLevel, "DIR", assetRoot)
-						dst := path.Join(c.Options.PublicDir, pathLevelSlice[1], c.Options.PageAsset)
+						dst := path.Join(dstPath, c.Options.PageAsset)
 						err = tools.DirCopy(assetRoot, dst)
 						if err != nil {
 							return err
@@ -110,20 +120,46 @@ func (c *CMD) render(startDIR string) error {
 	return nil
 }
 
-func (c *CMD) detailsCheck() {
-
-}
-
-func (c *CMD) processor(src string, dst string, dir string) error {
-	//fmt.Println("process")
-	dir = path.Join(c.Options.PublicDir, dir)
-	err := os.MkdirAll(dir, os.ModePerm)
-	if err != nil {
-		return fmt.Errorf("fail to create floder %v ", dir)
-	}
-	err = tools.FileCopy(src, dst)
+func (c *CMD) processor(src string, dst string, mode string) error {
+	article, err := tools.ArticleScanner(src)
 	if err != nil {
 		return err
 	}
+	c.detailsCheck(article)
+
+	wispeeer := tools.Wispeeer{
+		Article: article,
+		Options: c.Options,
+	}
+
+	if mode == "post" {
+		total++
+		tmpl := path.Join(c.ThemeStr, c.Options.Theme, c.LayoutStr, "post.html")
+		err = tools.PostRender(wispeeer, tmpl, dst)
+		if err != nil {
+			return err
+		}
+		// save article info to mem
+		wispeeers.Article = append(wispeeers.Article, article)
+	} else if mode == "page" {
+		pathSlice := strings.Split(filepath.ToSlash((src)), "/")
+		tmpl := path.Join(c.ThemeStr, c.Options.Theme, c.LayoutStr, pathSlice[1]+".html")
+		if !utils.IsExist(tmpl) {
+			tmpl = path.Join(c.ThemeStr, c.Options.Theme, c.LayoutStr, "page.html")
+		}
+		err = tools.PageRender(wispeeer, tmpl, dst)
+		if err != nil {
+			return err
+		}
+		wispeeers.Pages = append(wispeeers.Pages, pathSlice[1])
+	}
+
 	return nil
+}
+
+func (c *CMD) detailsCheck(article tools.Article) {
+	loger.Task("render").Infof("process %s\n", article.Metadata.Title)
+	// fmt.Println("*************************************")
+	// fmt.Printf("Title: %s\nPosted: %s\nCategories: %s\nTags: %s\n", article.Metadata.Title,
+	// 	article.Metadata.Posted, article.Metadata.Categories, article.Metadata.Tags)
 }
